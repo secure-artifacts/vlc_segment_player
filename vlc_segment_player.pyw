@@ -8,9 +8,14 @@ class VLCSegmentPlayer(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("VLC 视频分段播放器 (增强稳定版)")
-        self.geometry("1050x400")
+        self.geometry("1150x400")
 
         self.videos = []
+
+        # 校验函数注册：只允许输入数字，且长度不超过 2 位（用于时/分/秒下拉输入框）
+        self.vcmd_digits = (self.register(self._validate_digits), "%P")
+        # 校验函数注册：允许数字和最多一个小数点（用于速度输入框）
+        self.vcmd_rate = (self.register(self._validate_rate), "%P")
 
         # 1. VLC 路径配置区
         self.vlc_path_frame = tk.Frame(self)
@@ -69,9 +74,52 @@ class VLCSegmentPlayer(tk.Tk):
         filename = filedialog.askopenfilename(title="选择 VLC 可执行文件", filetypes=filetypes)
         if filename: self.vlc_path_var.set(filename)
 
+    # ---------- 输入校验相关 ----------
+
+    def _validate_digits(self, proposed):
+        """限制时/分/秒输入框只能输入 0-2 位数字（允许空字符串，方便用户先清空再输入）。"""
+        if proposed == "":
+            return True
+        if not proposed.isdigit():
+            return False
+        if len(proposed) > 2:
+            return False
+        return True
+
+    def _validate_rate(self, proposed):
+        """限制速度输入框只能输入数字和最多一个小数点。"""
+        if proposed == "":
+            return True
+        if proposed.count(".") > 1:
+            return False
+        return all(ch.isdigit() or ch == "." for ch in proposed)
+
+    def _clamp_time_var(self, var, max_val):
+        """输入框失去焦点时，将值规整为 0~max_val 范围内的两位数字符串。"""
+        raw = var.get().strip()
+        try:
+            value = int(raw) if raw != "" else 0
+        except ValueError:
+            value = 0
+        value = max(0, min(max_val, value))
+        var.set(f"{value:02d}")
+
+    def _clamp_rate_var(self, var):
+        """速度输入框失去焦点时，规整为合法的正浮点数（默认 1.0，且不超过 8.0）。"""
+        raw = var.get().strip()
+        try:
+            value = float(raw) if raw != "" else 1.0
+        except ValueError:
+            value = 1.0
+        if value <= 0:
+            value = 1.0
+        value = min(value, 8.0)
+        # 去掉多余的尾随 .0（保留一位小数即可，VLC 接受 1、1.5 等写法）
+        var.set(f"{value:g}")
+
     def build_time_selector(self, parent, col):
-        """在 parent 的 row=0 上创建 时:分:秒 三级下拉选择器，返回 (h_var, m_var, s_var)。
-        占用列范围为 [col, col+4]，共 5 列。"""
+        """在 parent 的 row=0 上创建 时:分:秒 三级可编辑下拉选择器（支持手动输入），返回 (h_var, m_var, s_var)。
+        占用列范围为 [col, col+5]，共 6 列（每个单位后附带 时/分/秒 文字标签）。"""
         h_var = tk.StringVar(value="00")
         m_var = tk.StringVar(value="00")
         s_var = tk.StringVar(value="00")
@@ -79,11 +127,24 @@ class VLCSegmentPlayer(tk.Tk):
         hours = [f"{i:02d}" for i in range(24)]
         minsecs = [f"{i:02d}" for i in range(60)]
 
-        ttk.Combobox(parent, textvariable=h_var, width=3, state="readonly", values=hours).grid(row=0, column=col, padx=(2, 0))
-        tk.Label(parent, text=":").grid(row=0, column=col + 1)
-        ttk.Combobox(parent, textvariable=m_var, width=3, state="readonly", values=minsecs).grid(row=0, column=col + 2)
-        tk.Label(parent, text=":").grid(row=0, column=col + 3)
-        ttk.Combobox(parent, textvariable=s_var, width=3, state="readonly", values=minsecs).grid(row=0, column=col + 4)
+        h_cb = ttk.Combobox(parent, textvariable=h_var, width=3, values=hours,
+                             validate="key", validatecommand=self.vcmd_digits)
+        h_cb.grid(row=0, column=col, padx=(2, 0))
+        tk.Label(parent, text="时").grid(row=0, column=col + 1)
+
+        m_cb = ttk.Combobox(parent, textvariable=m_var, width=3, values=minsecs,
+                             validate="key", validatecommand=self.vcmd_digits)
+        m_cb.grid(row=0, column=col + 2)
+        tk.Label(parent, text="分").grid(row=0, column=col + 3)
+
+        s_cb = ttk.Combobox(parent, textvariable=s_var, width=3, values=minsecs,
+                             validate="key", validatecommand=self.vcmd_digits)
+        s_cb.grid(row=0, column=col + 4)
+        tk.Label(parent, text="秒").grid(row=0, column=col + 5)
+
+        h_cb.bind("<FocusOut>", lambda e: self._clamp_time_var(h_var, 23))
+        m_cb.bind("<FocusOut>", lambda e: self._clamp_time_var(m_var, 59))
+        s_cb.bind("<FocusOut>", lambda e: self._clamp_time_var(s_var, 59))
 
         return h_var, m_var, s_var
 
@@ -99,16 +160,19 @@ class VLCSegmentPlayer(tk.Tk):
         tk.Entry(frame, textvariable=file_var).grid(row=0, column=1, padx=5, sticky="ew")
 
         tk.Label(frame, text="开始:").grid(row=0, column=2, padx=(10, 2))
-        start_h, start_m, start_s = self.build_time_selector(frame, col=3)  # 占用列 3-7
+        start_h, start_m, start_s = self.build_time_selector(frame, col=3)  # 占用列 3-8
 
-        tk.Label(frame, text="结束:").grid(row=0, column=9, padx=(10, 2))
-        end_h, end_m, end_s = self.build_time_selector(frame, col=10)  # 占用列 10-14
+        tk.Label(frame, text="结束:").grid(row=0, column=10, padx=(10, 2))
+        end_h, end_m, end_s = self.build_time_selector(frame, col=11)  # 占用列 11-16
 
-        tk.Label(frame, text="速度:").grid(row=0, column=16, padx=(10, 2))
-        rate_cb = ttk.Combobox(frame, textvariable=rate_var, width=5, state="readonly", values=["0.5", "1.0", "1.25", "1.5", "2.0"])
-        rate_cb.grid(row=0, column=17, padx=2)
+        tk.Label(frame, text="速度:").grid(row=0, column=18, padx=(10, 2))
+        rate_cb = ttk.Combobox(frame, textvariable=rate_var, width=6,
+                                values=["0.5", "1.0", "1.25", "1.5", "2.0"],
+                                validate="key", validatecommand=self.vcmd_rate)
+        rate_cb.grid(row=0, column=19, padx=2)
+        rate_cb.bind("<FocusOut>", lambda e: self._clamp_rate_var(rate_var))
 
-        tk.Button(frame, text="X", fg="white", bg="#CD5C5C", relief=tk.FLAT, command=lambda: self.remove_video_entry(frame)).grid(row=0, column=18, padx=5)
+        tk.Button(frame, text="X", fg="white", bg="#CD5C5C", relief=tk.FLAT, command=lambda: self.remove_video_entry(frame)).grid(row=0, column=20, padx=5)
 
         self.videos.append({
             "frame": frame,
@@ -119,14 +183,28 @@ class VLCSegmentPlayer(tk.Tk):
         })
 
     def get_seconds(self, h_var, m_var, s_var):
-        """将 时/分/秒 下拉框的值换算成总秒数。下拉框为只读，理论上不会出现非法值。"""
-        try:
-            h = int(h_var.get())
-            m = int(m_var.get())
-            s = int(s_var.get())
-        except ValueError:
-            return 0
+        """将 时/分/秒 输入框的值换算成总秒数。由于允许手动输入，这里做容错处理并夹取到合法范围。"""
+        def parse(var, max_val):
+            try:
+                value = int(var.get().strip() or 0)
+            except ValueError:
+                value = 0
+            return max(0, min(max_val, value))
+
+        h = parse(h_var, 23)
+        m = parse(m_var, 59)
+        s = parse(s_var, 59)
         return h * 3600 + m * 60 + s
+
+    def get_rate(self, rate_var):
+        """将速度输入框的值转换为合法的正浮点数，非法或缺失时回退为 1.0。"""
+        try:
+            value = float(rate_var.get().strip() or 1.0)
+        except ValueError:
+            value = 1.0
+        if value <= 0:
+            value = 1.0
+        return value
 
     def play_videos(self):
         vlc_path = self.vlc_path_var.get()
@@ -134,7 +212,12 @@ class VLCSegmentPlayer(tk.Tk):
             messagebox.showerror("错误", "VLC 路径不存在")
             return
 
-        args = [vlc_path]
+        args = [
+            vlc_path,
+            "--width=580",
+            "--height=480",
+            "--no-qt-video-autoresize",  # 禁止 VLC 根据视频分辨率自动调整窗口大小，切换视频时窗口尺寸保持不变
+        ]
         errors = []  # 收集所有出错/跳过的视频信息，最后统一提示
 
         for idx, v in enumerate(self.videos):
@@ -150,6 +233,7 @@ class VLCSegmentPlayer(tk.Tk):
 
             start = self.get_seconds(v["start_h"], v["start_m"], v["start_s"])
             end = self.get_seconds(v["end_h"], v["end_m"], v["end_s"])
+            rate = self.get_rate(v["rate_var"])
 
             # 结束时间为 00:00:00 视为"不设置结束时间"（播放到片尾）
             if end > 0 and end <= start:
@@ -161,7 +245,7 @@ class VLCSegmentPlayer(tk.Tk):
                 args.append(f":start-time={start}")
             if end > 0:
                 args.append(f":stop-time={end}")
-            args.append(f":rate={v['rate_var'].get()}")
+            args.append(f":rate={rate}")
 
         if errors:
             messagebox.showwarning("部分视频未播放", "\n".join(errors))
