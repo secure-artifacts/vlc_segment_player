@@ -7,8 +7,8 @@ import subprocess
 class VLCSegmentPlayer(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("VLC 视频分段播放器 (增强稳定版)")
-        self.geometry("1150x400")
+        self.title("VLC 视频分段播放器 ")
+        self.geometry("1250x400")
 
         self.videos = []
 
@@ -118,7 +118,9 @@ class VLCSegmentPlayer(tk.Tk):
         var.set(f"{value:g}")
 
     def build_time_selector(self, parent, col):
-        """在 parent 的 row=0 上创建 时:分:秒 三级可编辑下拉选择器（支持手动输入），返回 (h_var, m_var, s_var)。
+        """在 parent 的 row=0 上创建 时:分:秒 三级可编辑下拉选择器（支持手动输入），
+        返回 (h_var, m_var, s_var, widgets)，其中 widgets 是三个 Combobox 控件的列表，
+        方便外部按需启用/禁用（例如"从头到尾播放"勾选时）。
         占用列范围为 [col, col+5]，共 6 列（每个单位后附带 时/分/秒 文字标签）。"""
         h_var = tk.StringVar(value="00")
         m_var = tk.StringVar(value="00")
@@ -146,7 +148,7 @@ class VLCSegmentPlayer(tk.Tk):
         m_cb.bind("<FocusOut>", lambda e: self._clamp_time_var(m_var, 59))
         s_cb.bind("<FocusOut>", lambda e: self._clamp_time_var(s_var, 59))
 
-        return h_var, m_var, s_var
+        return h_var, m_var, s_var, [h_cb, m_cb, s_cb]
 
     def add_video_entry(self):
         frame = tk.Frame(self.videos_frame, pady=5, borderwidth=1, relief=tk.GROOVE)
@@ -155,24 +157,34 @@ class VLCSegmentPlayer(tk.Tk):
 
         file_var = tk.StringVar()
         rate_var = tk.StringVar(value="1.0")
+        full_play_var = tk.BooleanVar(value=False)
 
         tk.Button(frame, text="选择文件", command=lambda: self.browse_video(file_var)).grid(row=0, column=0, padx=5)
         tk.Entry(frame, textvariable=file_var).grid(row=0, column=1, padx=5, sticky="ew")
 
-        tk.Label(frame, text="开始:").grid(row=0, column=2, padx=(10, 2))
-        start_h, start_m, start_s = self.build_time_selector(frame, col=3)  # 占用列 3-8
+        # "从头到尾播放" 勾选框：勾选后忽略开始/结束时间，并禁用对应的时间输入框
+        full_play_cb = tk.Checkbutton(
+            frame, text="完整播放", variable=full_play_var,
+            command=lambda: self.toggle_time_widgets(full_play_var, time_widgets)
+        )
+        full_play_cb.grid(row=0, column=2, padx=(10, 2))
 
-        tk.Label(frame, text="结束:").grid(row=0, column=10, padx=(10, 2))
-        end_h, end_m, end_s = self.build_time_selector(frame, col=11)  # 占用列 11-16
+        tk.Label(frame, text="开始:").grid(row=0, column=3, padx=(10, 2))
+        start_h, start_m, start_s, start_widgets = self.build_time_selector(frame, col=4)  # 占用列 4-9
 
-        tk.Label(frame, text="速度:").grid(row=0, column=18, padx=(10, 2))
+        tk.Label(frame, text="结束:").grid(row=0, column=11, padx=(10, 2))
+        end_h, end_m, end_s, end_widgets = self.build_time_selector(frame, col=12)  # 占用列 12-17
+
+        time_widgets = start_widgets + end_widgets
+
+        tk.Label(frame, text="速度:").grid(row=0, column=19, padx=(10, 2))
         rate_cb = ttk.Combobox(frame, textvariable=rate_var, width=6,
                                 values=["0.5", "1.0", "1.25", "1.5", "2.0"],
                                 validate="key", validatecommand=self.vcmd_rate)
-        rate_cb.grid(row=0, column=19, padx=2)
+        rate_cb.grid(row=0, column=20, padx=2)
         rate_cb.bind("<FocusOut>", lambda e: self._clamp_rate_var(rate_var))
 
-        tk.Button(frame, text="X", fg="white", bg="#CD5C5C", relief=tk.FLAT, command=lambda: self.remove_video_entry(frame)).grid(row=0, column=20, padx=5)
+        tk.Button(frame, text="X", fg="white", bg="#CD5C5C", relief=tk.FLAT, command=lambda: self.remove_video_entry(frame)).grid(row=0, column=21, padx=5)
 
         self.videos.append({
             "frame": frame,
@@ -180,7 +192,15 @@ class VLCSegmentPlayer(tk.Tk):
             "start_h": start_h, "start_m": start_m, "start_s": start_s,
             "end_h": end_h, "end_m": end_m, "end_s": end_s,
             "rate_var": rate_var,
+            "full_play_var": full_play_var,
         })
+
+    def toggle_time_widgets(self, full_play_var, time_widgets):
+        """勾选"完整播放"时禁用开始/结束时间输入框（仅作视觉提示，实际是否生效以 full_play_var 为准）；
+        取消勾选时恢复可编辑。"""
+        state = "disabled" if full_play_var.get() else "normal"
+        for w in time_widgets:
+            w.configure(state=state)
 
     def get_seconds(self, h_var, m_var, s_var):
         """将 时/分/秒 输入框的值换算成总秒数。由于允许手动输入，这里做容错处理并夹取到合法范围。"""
@@ -212,12 +232,7 @@ class VLCSegmentPlayer(tk.Tk):
             messagebox.showerror("错误", "VLC 路径不存在")
             return
 
-        args = [
-            vlc_path,
-            "--width=580",
-            "--height=480",
-            "--no-qt-video-autoresize",  # 禁止 VLC 根据视频分辨率自动调整窗口大小，切换视频时窗口尺寸保持不变
-        ]
+        args = [vlc_path]
         errors = []  # 收集所有出错/跳过的视频信息，最后统一提示
 
         for idx, v in enumerate(self.videos):
@@ -231,14 +246,22 @@ class VLCSegmentPlayer(tk.Tk):
                 errors.append(f"第 {idx + 1} 个视频: 文件不存在 ({path})，已跳过")
                 continue
 
-            start = self.get_seconds(v["start_h"], v["start_m"], v["start_s"])
-            end = self.get_seconds(v["end_h"], v["end_m"], v["end_s"])
-            rate = self.get_rate(v["rate_var"])
+            full_play = v["full_play_var"].get()
 
-            # 结束时间为 00:00:00 视为"不设置结束时间"（播放到片尾）
-            if end > 0 and end <= start:
-                errors.append(f"第 {idx + 1} 个视频: 结束时间需大于开始时间，已跳过")
-                continue
+            if full_play:
+                # 勾选了"完整播放"：无视时间输入框，从头播放到片尾
+                start = 0
+                end = 0
+            else:
+                start = self.get_seconds(v["start_h"], v["start_m"], v["start_s"])
+                end = self.get_seconds(v["end_h"], v["end_m"], v["end_s"])
+
+                # 结束时间为 00:00:00 视为"不设置结束时间"（播放到片尾）
+                if end > 0 and end <= start:
+                    errors.append(f"第 {idx + 1} 个视频: 结束时间需大于开始时间，已跳过")
+                    continue
+
+            rate = self.get_rate(v["rate_var"])
 
             args.append(path)
             if start > 0:
